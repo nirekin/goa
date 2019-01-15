@@ -3,23 +3,21 @@ package xray
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 	"time"
 
-	"goa.design/goa/http/middleware"
+	"goa.design/goa/grpc/middleware"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 const (
-	// SegKey is the request context key used to store the segments if any.
-	SegKey contextKey = iota + 1
-)
-
-type (
-	// private type used to define context keys.
-	contextKey int
+	// SegmentMetadataKey is the request metadata key used to store the segments
+	// if any.
+	SegmentMetadataKey = "Segment"
 )
 
 // New returns a middleware that sends AWS X-Ray segments to the daemon running
@@ -52,36 +50,46 @@ type (
 //     }
 //     return
 //
-func New(service, daemon string) (func(http.Handler) http.Handler, error) {
+func New(service, daemon string) (grpc.UnaryServerInterceptor, error) {
 	connection, err := periodicallyRedialingConn(context.Background(), time.Minute, func() (net.Conn, error) {
 		return net.Dial("udp", daemon)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
 	}
-	return func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var (
-				ctx      = r.Context()
-				spanID   = ctx.Value(middleware.TraceSpanIDKey)
-				traceID  = ctx.Value(middleware.TraceIDKey)
-				parentID = ctx.Value(middleware.TraceParentSpanIDKey)
-			)
-			if traceID == nil || spanID == nil {
-				h.ServeHTTP(w, r)
-			} else {
-				s := NewSegment(service, traceID.(string), spanID.(string), connection())
-				defer s.Close()
-				s.ResponseWriter = w
-				s.RecordRequest(r, "")
-				if parentID != nil {
-					s.ParentID = parentID.(string)
-				}
-				ctx = context.WithValue(ctx, SegKey, s)
-				h.ServeHTTP(s, r.WithContext(ctx))
-			}
-		})
-	}, nil
+	return grpc.UnaryServerInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			// incoming metadata does not exist. Probably trace middleware is not
+			// loaded before this one.
+			return handler(ctx, req)
+		}
+
+		var (
+			traceID  string
+			spanID   string
+			parentID string
+		)
+		{
+			traceID = middleware.MetadataValue(md, middleware.TraceIDMetadataKey)
+			spanID = middleware.MetadataValue(md, middleware.SpanIDMetadataKey)
+			parentID = middleware.MetadataValue(md, middleware.ParentSpanIDMetadataKey)
+		}
+		if traceID == "" || spanID == "" {
+			return handler(ctx, req)
+		}
+		s := NewSegment(service, traceID, spanID, connection())
+		defer s.Close()
+		s.RecordRequest(ctx, info.FullMethod, "")
+		if parentID != "" {
+			s.ParentID = parentID
+		}
+		if b, err := json.Marshal(s); err == nil {
+			md.Set(SegmentMetadataKey, string(b))
+		}
+		ctx = metadata.NewIncomingContext(ctx, md)
+		return handler(ctx, req)
+	}), nil
 }
 
 // NewID is a span ID creation algorithm which produces values that are

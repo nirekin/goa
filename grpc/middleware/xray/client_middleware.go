@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"goa.design/goa/grpc/middleware"
 	"google.golang.org/grpc"
@@ -22,8 +21,9 @@ func NewClient(host string) grpc.UnaryClientInterceptor {
 
 		var seg *Segment
 		{
-			if vals := md.Get(SegmentMetadataKey); len(vals) > 0 {
-				if err := json.Unmarshal([]byte(vals[0]), seg); err != nil {
+			s := middleware.MetadataValue(md, SegmentMetadataKey)
+			if s != "" {
+				if err := json.Unmarshal([]byte(s), seg); err != nil {
 					return fmt.Errorf("error unmarshalling segment from metadata: %v", err)
 				}
 			}
@@ -39,12 +39,12 @@ func NewClient(host string) grpc.UnaryClientInterceptor {
 		md = middleware.WithSpan(md, sub.TraceID, sub.ID, sub.ParentID)
 		ctx = metadata.NewOutgoingContext(ctx, md)
 
-		sub.RecordRequest(req, "remote")
+		sub.RecordRequest(ctx, method, "remote")
 		err := invoker(ctx, method, req, reply, cc, opts...)
 		if err != nil {
 			sub.RecordError(err)
 		} else {
-			sub.RecordResponse(resp)
+			sub.RecordResponse()
 		}
 		return err
 	})

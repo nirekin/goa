@@ -1,17 +1,20 @@
 package xray
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/pkg/errors"
+	"goa.design/goa/grpc/middleware"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 )
 
 type (
@@ -92,8 +95,8 @@ type (
 
 	// Response describes a HTTP response.
 	Response struct {
-		Status        int   `json:"status"`
-		ContentLength int64 `json:"content_length"`
+		Status        codes.Code `json:"status"`
+		ContentLength int64      `json:"content_length"`
 	}
 
 	// Cause list errors that happens during the request.
@@ -165,7 +168,7 @@ func NewSegment(name, traceID, spanID string, conn net.Conn) *Segment {
 // RecordRequest traces a request.
 //
 // It sets Http.Request & Namespace (ex: "remote")
-func (s *Segment) RecordRequest(req *http.Request, namespace string) {
+func (s *Segment) RecordRequest(ctx context.Context, method, namespace string) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -174,13 +177,13 @@ func (s *Segment) RecordRequest(req *http.Request, namespace string) {
 	}
 
 	s.Namespace = namespace
-	s.HTTP.Request = requestData(req)
+	s.HTTP.Request = requestData(ctx, method)
 }
 
 // RecordResponse traces a response.
 //
 // It sets Throttle, Fault, Error and HTTP.Response
-func (s *Segment) RecordResponse(resp *http.Response) {
+func (s *Segment) RecordResponse() {
 	s.Lock()
 	defer s.Unlock()
 
@@ -188,44 +191,9 @@ func (s *Segment) RecordResponse(resp *http.Response) {
 		s.HTTP = &HTTP{}
 	}
 
-	s.recordStatusCode(resp.StatusCode)
-
-	s.HTTP.Response = responseData(resp)
-}
-
-// WriteHeader records the HTTP response code and calls the corresponding
-// ResponseWriter method.
-func (s *Segment) WriteHeader(code int) {
-	s.Lock()
-	defer s.Unlock()
-	if s.HTTP == nil {
-		s.HTTP = &HTTP{}
+	s.HTTP.Response = &Response{
+		Status: codes.OK,
 	}
-	if s.HTTP.Response == nil {
-		s.HTTP.Response = &Response{}
-	}
-	s.HTTP.Response.Status = code
-	s.recordStatusCode(code)
-	s.ResponseWriter.WriteHeader(code)
-}
-
-// Write records the HTTP response content length and error (if any)
-// and calls the corresponding ResponseWriter method.
-func (s *Segment) Write(p []byte) (int, error) {
-	s.Lock()
-	defer s.Unlock()
-	n, err := s.ResponseWriter.Write(p)
-	if err != nil {
-		s.RecordError(err)
-	}
-	if s.HTTP == nil {
-		s.HTTP = &HTTP{}
-	}
-	if s.HTTP.Response == nil {
-		s.HTTP.Response = &Response{}
-	}
-	s.HTTP.Response.ContentLength = int64(n)
-	return n, err
 }
 
 // RecordError traces an error. The client may also want to initialize the
@@ -433,53 +401,21 @@ func exceptionData(e error) *Exception {
 }
 
 // requestData creates a Request from a http.Request.
-func requestData(req *http.Request) *Request {
+func requestData(ctx context.Context, method string) *Request {
 	var (
-		scheme = "http"
-		host   = req.Host
+		agent string
 	)
-	if len(req.URL.Scheme) > 0 {
-		scheme = req.URL.Scheme
-	}
-	if len(req.URL.Host) > 0 {
-		host = req.URL.Host
-	}
-
-	return &Request{
-		Method:        req.Method,
-		URL:           fmt.Sprintf("%s://%s%s", scheme, host, req.URL.Path),
-		ClientIP:      getIP(req),
-		UserAgent:     req.UserAgent(),
-		ContentLength: req.ContentLength,
-	}
-}
-
-// responseData creates a Response from a http.Response.
-func responseData(resp *http.Response) *Response {
-	return &Response{
-		Status:        resp.StatusCode,
-		ContentLength: resp.ContentLength,
-	}
-}
-
-// getIP implements a heuristic that returns an origin IP address for a request.
-func getIP(req *http.Request) string {
-	for _, h := range []string{"X-Forwarded-For", "X-Real-Ip"} {
-		for _, ip := range strings.Split(req.Header.Get(h), ",") {
-			if len(ip) == 0 {
-				continue
-			}
-			realIP := net.ParseIP(strings.Replace(ip, " ", "", -1))
-			return realIP.String()
+	{
+		md, ok := metadata.FromIncomingContext(ctx)
+		if ok {
+			agent = middleware.MetadataValue(md, "user-agent")
 		}
 	}
 
-	// not found in header
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err != nil {
-		return req.RemoteAddr
+	return &Request{
+		Method:    method,
+		UserAgent: agent,
 	}
-	return host
 }
 
 // now returns the current time as a float appropriate for X-Ray processing.
