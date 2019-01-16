@@ -29,7 +29,7 @@ func NewClient(host string) grpc.UnaryClientInterceptor {
 			}
 		}
 		if seg == nil {
-			return nil
+			return invoker(ctx, method, req, reply, cc, opts...)
 		}
 
 		sub := seg.NewSubsegment(host)
