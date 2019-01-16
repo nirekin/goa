@@ -37,6 +37,9 @@ func NewClient(host string) grpc.UnaryClientInterceptor {
 
 		// update the context with the latest segment
 		md = middleware.WithSpan(md, sub.TraceID, sub.ID, sub.ParentID)
+		if b, err := json.Marshal(sub); err == nil {
+			md.Set(SegmentMetadataKey, string(b))
+		}
 		ctx = metadata.NewOutgoingContext(ctx, md)
 
 		sub.RecordRequest(ctx, method, "remote")
