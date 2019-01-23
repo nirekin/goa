@@ -3,84 +3,83 @@ package middleware
 import (
 	"context"
 
+	"goa.design/goa/middleware"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-)
-
-type (
-	// RequestIDOption uses a constructor pattern to customize middleware
-	RequestIDOption func(*requestIDOption) *requestIDOption
-
-	// requestIDOption is the struct storing all the options.
-	requestIDOption struct {
-		// useXRequestIDMetadata is true to use incoming "X-Request-Id" metadata,
-		// instead of always generating unique IDs, when present in request.
-		// Defaults to always-generate.
-		useXRequestIDMetadata bool
-		// xRequestMetadataLimit is positive to truncate incoming "X-Request-Id"
-		// metadata at the specified length. Defaults to no limit.
-		xRequestMetadataLimit int
-	}
 )
 
 const (
 	// RequestIDMetadataKey is the key containing the request ID in the gRPC
 	// metadata.
-	RequestIDMetadataKey = "X-Request-Id"
+	RequestIDMetadataKey = "x-request-id"
 )
 
-// RequestID returns a middleware, which initializes the metadata with a unique
-// value under the RequestIDMetadata key. Optionally uses the incoming
-// "X-Request-Id" metadata key, if present, with or without a length limit to
-// use as request ID. The default behavior is to always generate a new ID.
+// UnaryRequestID returns a middleware for unary gRPC requests which
+// initializes the request metadata with a unique value under the
+// RequestIDMetadata key. Optionally, it uses the incoming "x-request-id"
+// request metadata key, if present, with or without a length limit to use as
+// request ID. The default behavior is to always generate a new ID.
 //
 // examples of use:
-//  service.Use(middleware.RequestID())
+//  grpc.NewServer(middleware.UnaryRequestID())
 //
-//  // enable options for using "X-Request-Id" metadata key with length limit.
-//  service.Use(middleware.RequestID(
+//  // enable options for using "x-request-id" metadata key with length limit.
+//  grpc.NewServer(middleware.UnaryRequestID(
 //    middleware.UseXRequestIDMetadataOption(true),
 //    middleware.XRequestMetadataLimitOption(128)))
-func RequestID(options ...RequestIDOption) grpc.UnaryServerInterceptor {
-	o := new(requestIDOption)
-	for _, option := range options {
-		o = option(o)
-	}
+func UnaryRequestID(options ...middleware.RequestIDOption) grpc.UnaryServerInterceptor {
+	o := middleware.NewRequestIDOptions(options...)
 	return grpc.UnaryServerInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			md = metadata.MD{}
-		}
-		var id string
-		{
-			if o.useXRequestIDMetadata {
-				id = MetadataValue(md, RequestIDMetadataKey)
-				if o.xRequestMetadataLimit > 0 && len(id) > o.xRequestMetadataLimit {
-					id = id[:o.xRequestMetadataLimit]
-				}
-			} else {
-				id = shortID()
-			}
-		}
-		md.Set(RequestIDMetadataKey, id)
-		ctx = metadata.NewIncomingContext(ctx, md)
+		ctx = generateRequestID(ctx, o)
 		return handler(ctx, req)
 	})
 }
 
-// UseXRequestIDMetadataOption enables/disables using "X-Request-Id" metadata.
-func UseXRequestIDMetadataOption(f bool) RequestIDOption {
-	return func(o *requestIDOption) *requestIDOption {
-		o.useXRequestIDMetadata = f
-		return o
-	}
+// StreamRequestID returns a middleware for streaming gRPC requests which
+// initializes the stream metadata with a unique value under the
+// RequestIDMetadata key. Optionally, it uses the incoming "x-request-id"
+// request metadata key, if present, with or without a length limit to use as
+// request ID. The default behavior is to always generate a new ID.
+//
+// examples of use:
+//  grpc.NewServer(middleware.StreamRequestID())
+//
+//  // enable options for using "x-request-id" metadata key with length limit.
+//  grpc.NewServer(middleware.StreamRequestID(
+//    middleware.UseXRequestIDMetadataOption(true),
+//    middleware.XRequestMetadataLimitOption(128)))
+func StreamRequestID(options ...middleware.RequestIDOption) grpc.StreamServerInterceptor {
+	o := middleware.NewRequestIDOptions(options...)
+	return grpc.StreamServerInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := generateRequestID(ss.Context(), o)
+		wss := NewWrappedServerStream(ctx)
+		return handler(srv, wss)
+	})
 }
 
-// XRequestMetadataLimitOption sets the option for limiting "X-Request-Id"
+// UseXRequestIDMetadataOption enables/disables using "x-request-id" metadata.
+func UseXRequestIDMetadataOption(f bool) middleware.RequestIDOption {
+	return middleware.UseRequestIDOption(f)
+}
+
+// XRequestMetadataLimitOption sets the option for limiting "x-request-id"
 // metadata length.
-func XRequestMetadataLimitOption(limit int) RequestIDOption {
-	return func(o *requestIDOption) *requestIDOption {
-		o.xRequestMetadataLimit = limit
-		return o
+func XRequestMetadataLimitOption(limit int) middleware.RequestIDOption {
+	return middleware.RequestIDLimitOption(limit)
+}
+
+// generateRequestID sets the request ID in the incoming request metadata.
+func generateRequestID(ctx context.Context, opts *middleware.RequestIDOptions) context.Context {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		md = metadata.MD{}
 	}
+	if opts.IsUseRequestID() {
+		if id := MetadataValue(md, RequestIDMetadataKey); id != "" {
+			ctx = context.WithValue(ctx, middleware.RequestIDKey, id)
+		}
+	}
+	ctx = middleware.GenerateRequestID(ctx, opts)
+	md.Set(RequestIDMetadataKey, ctx.Value(middleware.RequestIDKey).(string))
+	return metadata.NewIncomingContext(ctx, md)
 }
