@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/pkg/errors"
+	"goa.design/goa/middleware/xray"
 )
 
 func TestRecordError(t *testing.T) {
@@ -227,7 +228,7 @@ func TestRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect to daemon - %s", err)
 	}
-	s := NewSegment("hello", NewTraceID(), NewID(), conn)
+	s := NewSegment("hello", xray.NewTraceID(), xray.NewID(), conn)
 
 	wg := &sync.WaitGroup{}
 	raceFct := func() {

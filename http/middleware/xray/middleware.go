@@ -2,24 +2,13 @@ package xray
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
-	"goa.design/goa/http/middleware"
-)
-
-const (
-	// SegKey is the request context key used to store the segments if any.
-	SegKey contextKey = iota + 1
-)
-
-type (
-	// private type used to define context keys.
-	contextKey int
+	"goa.design/goa/middleware"
+	"goa.design/goa/middleware/xray"
 )
 
 // New returns a middleware that sends AWS X-Ray segments to the daemon running
@@ -53,7 +42,7 @@ type (
 //     return
 //
 func New(service, daemon string) (func(http.Handler) http.Handler, error) {
-	connection, err := periodicallyRedialingConn(context.Background(), time.Minute, func() (net.Conn, error) {
+	connection, err := xray.Connect(context.Background(), time.Minute, func() (net.Conn, error) {
 		return net.Dial("udp", daemon)
 	})
 	if err != nil {
@@ -77,68 +66,9 @@ func New(service, daemon string) (func(http.Handler) http.Handler, error) {
 				if parentID != nil {
 					s.ParentID = parentID.(string)
 				}
-				ctx = context.WithValue(ctx, SegKey, s)
+				ctx = context.WithValue(ctx, xray.SegKey, s)
 				h.ServeHTTP(s, r.WithContext(ctx))
 			}
 		})
-	}, nil
-}
-
-// NewID is a span ID creation algorithm which produces values that are
-// compatible with AWS X-Ray.
-func NewID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
-}
-
-// NewTraceID is a trace ID creation algorithm which produces values that are
-// compatible with AWS X-Ray.
-func NewTraceID() string {
-	b := make([]byte, 12)
-	rand.Read(b)
-	return fmt.Sprintf("%d-%x-%s", 1, time.Now().Unix(), fmt.Sprintf("%x", b))
-}
-
-// periodicallyRedialingConn creates a goroutine to periodically re-dial a
-// connection, so the hostname can be re-resolved if the IP changes.
-// Returns a func that provides the latest Conn value.
-func periodicallyRedialingConn(ctx context.Context, renewPeriod time.Duration, dial func() (net.Conn, error)) (func() net.Conn, error) {
-	var (
-		err error
-
-		// guard access to c
-		mu sync.RWMutex
-		c  net.Conn
-	)
-
-	// get an initial connection
-	if c, err = dial(); err != nil {
-		return nil, err
-	}
-
-	// periodically re-dial
-	go func() {
-		ticker := time.NewTicker(renewPeriod)
-		for {
-			select {
-			case <-ticker.C:
-				newConn, err := dial()
-				if err != nil {
-					continue // we don't have anything better to replace `c` with
-				}
-				mu.Lock()
-				c = newConn
-				mu.Unlock()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return func() net.Conn {
-		mu.RLock()
-		defer mu.RUnlock()
-		return c
 	}, nil
 }

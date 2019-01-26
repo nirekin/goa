@@ -13,8 +13,10 @@ import (
 
 	"github.com/pkg/errors"
 	"goa.design/goa/grpc/middleware"
+	"goa.design/goa/middleware/xray"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
 
 type (
@@ -72,8 +74,7 @@ type (
 		conn net.Conn
 		// counter keeps track of the number of subsegments that have not
 		// completed yet.
-		counter             int
-		http.ResponseWriter `json:"-"`
+		counter int
 	}
 
 	// HTTP describes a HTTP request.
@@ -237,7 +238,7 @@ func (s *Segment) NewSubsegment(name string) *Segment {
 
 	sub := &Segment{
 		Mutex:      &sync.Mutex{},
-		ID:         NewID(),
+		ID:         xray.NewID(),
 		TraceID:    s.TraceID,
 		ParentID:   s.ID,
 		Type:       "subsegment",
@@ -402,19 +403,24 @@ func exceptionData(e error) *Exception {
 
 // requestData creates a Request from a http.Request.
 func requestData(ctx context.Context, method string) *Request {
-	var (
-		agent string
-	)
+	var agent string
 	{
 		md, ok := metadata.FromIncomingContext(ctx)
 		if ok {
 			agent = middleware.MetadataValue(md, "user-agent")
 		}
 	}
+	var ip string
+	{
+		if p, ok := peer.FromContext(ctx); ok {
+			ip, _, _ = net.SplitHostPort(p.Addr.String())
+		}
+	}
 
 	return &Request{
 		Method:    method,
 		UserAgent: agent,
+		ClientIP:  ip,
 	}
 }
 

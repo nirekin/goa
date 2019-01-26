@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"goa.design/goa/middleware/xray"
 )
 
 type (
@@ -269,7 +270,7 @@ func (s *Segment) NewSubsegment(name string) *Segment {
 
 	sub := &Segment{
 		Mutex:      &sync.Mutex{},
-		ID:         NewID(),
+		ID:         xray.NewID(),
 		TraceID:    s.TraceID,
 		ParentID:   s.ID,
 		Type:       "subsegment",

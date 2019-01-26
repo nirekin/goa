@@ -2,37 +2,26 @@ package xray
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
-	"goa.design/goa/grpc/middleware"
+	grpcm "goa.design/goa/grpc/middleware"
+	"goa.design/goa/middleware"
+	"goa.design/goa/middleware/xray"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
-const (
-	// SegmentMetadataKey is the request metadata key used to store the segments
-	// if any.
-	SegmentMetadataKey = "Segment"
-)
-
-// New returns a middleware that sends AWS X-Ray segments to the daemon running
-// at the given address.
+// NewUnaryServer returns a server middleware that sends AWS X-Ray segments
+// to the daemon running at the given address. It stores the request segment
+// in the context. User code can further configure the segment for example to
+// set a service version or record an error. It extracts the trace information
+// from the incoming unary request metadata using the tracing middleware
+// package. The tracing middleware must be mounted on the service.
 //
 // service is the name of the service reported to X-Ray. daemon is the hostname
 // (including port) of the X-Ray daemon collecting the segments.
-//
-// The middleware works by extracting the trace information from the context
-// using the tracing middleware package. The tracing middleware must be mounted
-// first on the service.
-//
-// The middleware stores the request segment in the context. User code can
-// further configure the segment for example to set a service version or
-// record an error.
 //
 // User code may create child segments using the Segment NewSubsegment method
 // for tracing requests to external services. Such segments should be closed via
@@ -50,103 +39,124 @@ const (
 //     }
 //     return
 //
-func New(service, daemon string) (grpc.UnaryServerInterceptor, error) {
-	connection, err := periodicallyRedialingConn(context.Background(), time.Minute, func() (net.Conn, error) {
+func NewUnaryServer(service, daemon string) (grpc.UnaryServerInterceptor, error) {
+	connection, err := xray.Connect(context.Background(), time.Minute, func() (net.Conn, error) {
 		return net.Dial("udp", daemon)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
 	}
 	return grpc.UnaryServerInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			// incoming metadata does not exist. Probably trace middleware is not
-			// loaded before this one.
+		var s *Segment
+		ctx, s = withSegment(ctx, service, info.FullMethod, connection)
+		if s == nil {
 			return handler(ctx, req)
 		}
-
-		var (
-			traceID  string
-			spanID   string
-			parentID string
-		)
-		{
-			traceID = middleware.MetadataValue(md, middleware.TraceIDMetadataKey)
-			spanID = middleware.MetadataValue(md, middleware.SpanIDMetadataKey)
-			parentID = middleware.MetadataValue(md, middleware.ParentSpanIDMetadataKey)
-		}
-		if traceID == "" || spanID == "" {
-			return handler(ctx, req)
-		}
-		s := NewSegment(service, traceID, spanID, connection())
 		defer s.Close()
-		s.RecordRequest(ctx, info.FullMethod, "")
-		if parentID != "" {
-			s.ParentID = parentID
-		}
-		if b, err := json.Marshal(s); err == nil {
-			md.Set(SegmentMetadataKey, string(b))
-		}
-		ctx = metadata.NewIncomingContext(ctx, md)
 		return handler(ctx, req)
 	}), nil
 }
 
-// NewID is a span ID creation algorithm which produces values that are
-// compatible with AWS X-Ray.
-func NewID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+// NewStreamServer is similar to NewUnaryServer except it is used for
+// streaming endpoints.
+func NewStreamServer(service, daemon string) (grpc.StreamServerInterceptor, error) {
+	connection, err := xray.Connect(context.Background(), time.Minute, func() (net.Conn, error) {
+		return net.Dial("udp", daemon)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
+	}
+	return grpc.StreamServerInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ctx := ss.Context()
+		var s *Segment
+		ctx, s = withSegment(ctx, service, info.FullMethod, connection)
+		wss := grpcm.NewWrappedServerStream(ctx)
+		if s == nil {
+			return handler(srv, wss)
+		}
+		defer s.Close()
+		return handler(srv, wss)
+	}), nil
 }
 
-// NewTraceID is a trace ID creation algorithm which produces values that are
-// compatible with AWS X-Ray.
-func NewTraceID() string {
-	b := make([]byte, 12)
-	rand.Read(b)
-	return fmt.Sprintf("%d-%x-%s", 1, time.Now().Unix(), fmt.Sprintf("%x", b))
+// UnaryClient middleware creates XRay subsegments if a segment is found in
+// the context and stores the subsegment to the context. It also sets the
+// trace information in the context which is used by the tracing middleware.
+// This middleware must be mounted before the tracing middleware.
+func UnaryClient(host string) grpc.UnaryClientInterceptor {
+	return grpc.UnaryClientInterceptor(func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		seg := ctx.Value(xray.SegKey)
+		if seg == nil {
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+		s := seg.(*Segment)
+		sub := s.NewSubsegment(host)
+		defer sub.Close()
+
+		// update the context with the latest segment
+		ctx = middleware.WithSpan(ctx, sub.TraceID, sub.ID, sub.ParentID)
+		sub.RecordRequest(ctx, method, "remote")
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if err != nil {
+			sub.RecordError(err)
+		} else {
+			sub.RecordResponse()
+		}
+		return nil
+	})
 }
 
-// periodicallyRedialingConn creates a goroutine to periodically re-dial a
-// connection, so the hostname can be re-resolved if the IP changes.
-// Returns a func that provides the latest Conn value.
-func periodicallyRedialingConn(ctx context.Context, renewPeriod time.Duration, dial func() (net.Conn, error)) (func() net.Conn, error) {
-	var (
-		err error
+// StreamClient is the streaming endpoint middleware equivalent for UnaryClient.
+func StreamClient(host string) grpc.StreamClientInterceptor {
+	return grpc.StreamClientInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		seg := ctx.Value(xray.SegKey)
+		if seg == nil {
+			return streamer(ctx, desc, cc, method, opts...)
+		}
+		s := seg.(*Segment)
+		sub := s.NewSubsegment(host)
+		defer sub.Close()
 
-		// guard access to c
-		mu sync.RWMutex
-		c  net.Conn
-	)
+		// update the context with the latest segment
+		ctx = middleware.WithSpan(ctx, sub.TraceID, sub.ID, sub.ParentID)
+		sub.RecordRequest(ctx, method, "remote")
+		cs, err := streamer(ctx, desc, cc, method, opts...)
+		if err != nil {
+			sub.RecordError(err)
+		} else {
+			sub.RecordResponse()
+		}
+		return cs, nil
+	})
+}
 
-	// get an initial connection
-	if c, err = dial(); err != nil {
-		return nil, err
+// withSegment creates a new X-Ray segment and stores it in the context.
+// It also returns the newly created segment.
+func withSegment(ctx context.Context, service, method string, connection func() net.Conn) (context.Context, *Segment) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		// incoming metadata does not exist. Probably trace middleware is not
+		// loaded before this one.
+		return ctx, nil
 	}
 
-	// periodically re-dial
-	go func() {
-		ticker := time.NewTicker(renewPeriod)
-		for {
-			select {
-			case <-ticker.C:
-				newConn, err := dial()
-				if err != nil {
-					continue // we don't have anything better to replace `c` with
-				}
-				mu.Lock()
-				c = newConn
-				mu.Unlock()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return func() net.Conn {
-		mu.RLock()
-		defer mu.RUnlock()
-		return c
-	}, nil
+	var (
+		traceID  string
+		spanID   string
+		parentID string
+	)
+	{
+		traceID = grpcm.MetadataValue(md, grpcm.TraceIDMetadataKey)
+		spanID = grpcm.MetadataValue(md, grpcm.SpanIDMetadataKey)
+		parentID = grpcm.MetadataValue(md, grpcm.ParentSpanIDMetadataKey)
+	}
+	if traceID == "" || spanID == "" {
+		return ctx, nil
+	}
+	s := NewSegment(service, traceID, spanID, connection())
+	s.RecordRequest(ctx, method, "")
+	if parentID != "" {
+		s.ParentID = parentID
+	}
+	return context.WithValue(ctx, xray.SegKey, s), s
 }
