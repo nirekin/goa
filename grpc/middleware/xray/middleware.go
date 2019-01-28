@@ -146,17 +146,17 @@ func withSegment(ctx context.Context, service, method string, connection func() 
 		parentID string
 	)
 	{
-		traceID = grpcm.MetadataValue(md, grpcm.TraceIDMetadataKey)
-		spanID = grpcm.MetadataValue(md, grpcm.SpanIDMetadataKey)
-		parentID = grpcm.MetadataValue(md, grpcm.ParentSpanIDMetadataKey)
+		spanID = ctx.Value(middleware.TraceSpanIDKey)
+		traceID = ctx.Value(middleware.TraceIDKey)
+		parentID = ctx.Value(middleware.TraceParentSpanIDKey)
 	}
-	if traceID == "" || spanID == "" {
+	if traceID == nil || spanID == nil {
 		return ctx, nil
 	}
-	s := &GRPCSegment{xray.NewSegment(service, traceID, spanID, connection())}
+	s := &GRPCSegment{xray.NewSegment(service, traceID.(string), spanID.(string), connection())}
 	s.RecordRequest(ctx, method, "")
 	if parentID != "" {
-		s.ParentID = parentID
+		s.ParentID = parentID.(string)
 	}
 	return context.WithValue(ctx, xray.SegKey, s.Segment), s
 }
