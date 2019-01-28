@@ -142,7 +142,7 @@ func withSegment(ctx context.Context, service, method string, connection func() 
 	}
 	s := &GRPCSegment{xray.NewSegment(service, traceID.(string), spanID.(string), connection())}
 	s.RecordRequest(ctx, method, "")
-	if parentID != "" {
+	if parentID != nil {
 		s.ParentID = parentID.(string)
 	}
 	return context.WithValue(ctx, xray.SegKey, s.Segment), s
