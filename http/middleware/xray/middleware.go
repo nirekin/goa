@@ -31,7 +31,7 @@ import (
 // closing the top level segment. Typical usage:
 //
 //     if s := ctx.Value(SegKey); s != nil {
-//       segment := s.(*Segment)
+//       segment := s.(*xray.Segment)
 //     }
 //     sub := segment.NewSubsegment("external-service")
 //     defer sub.Close()
@@ -59,15 +59,17 @@ func New(service, daemon string) (func(http.Handler) http.Handler, error) {
 			if traceID == nil || spanID == nil {
 				h.ServeHTTP(w, r)
 			} else {
-				s := NewSegment(service, traceID.(string), spanID.(string), connection())
-				defer s.Close()
-				s.ResponseWriter = w
-				s.RecordRequest(r, "")
-				if parentID != nil {
-					s.ParentID = parentID.(string)
+				hs := &HTTPSegment{
+					Segment:        xray.NewSegment(service, traceID.(string), spanID.(string), connection()),
+					ResponseWriter: w,
 				}
-				ctx = context.WithValue(ctx, xray.SegKey, s)
-				h.ServeHTTP(s, r.WithContext(ctx))
+				defer hs.Close()
+				hs.RecordRequest(r, "")
+				if parentID != nil {
+					hs.ParentID = parentID.(string)
+				}
+				ctx = context.WithValue(ctx, xray.SegKey, hs.Segment)
+				h.ServeHTTP(hs, r.WithContext(ctx))
 			}
 		})
 	}, nil

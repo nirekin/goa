@@ -137,7 +137,7 @@ func TestMiddleware(t *testing.T) {
 			h      = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				s := r.Context().Value(xray.SegKey)
 				if c.Segment.Exception != "" && s != nil {
-					s.(*Segment).RecordError(errors.New(c.Segment.Exception))
+					s.(*xray.Segment).RecordError(errors.New(c.Segment.Exception))
 				}
 				w.WriteHeader(c.Response.Status)
 			})
@@ -160,12 +160,12 @@ func TestMiddleware(t *testing.T) {
 		js := readUDP(t, func() {
 			m(h).ServeHTTP(rw, req)
 		})
-		var s *Segment
+		var s *xray.Segment
 		elems := strings.Split(js, "\n")
 		if len(elems) != 2 {
 			t.Fatalf("%s: invalid number of lines, expected 2 got %d: %v", k, len(elems), elems)
 		}
-		if elems[0] != udpHeader[:len(udpHeader)-1] {
+		if elems[0] != xray.UDPHeader[:len(xray.UDPHeader)-1] {
 			t.Errorf("%s: invalid header, got %s", k, elems[0])
 		}
 		err = json.Unmarshal([]byte(elems[1]), &s)

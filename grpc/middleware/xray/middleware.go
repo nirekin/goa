@@ -29,7 +29,7 @@ import (
 // closing the top level segment. Typical usage:
 //
 //     if s := ctx.Value(SegKey); s != nil {
-//       segment := s.(*Segment)
+//       segment := s.(*xray.Segment)
 //     }
 //     sub := segment.NewSubsegment("external-service")
 //     defer sub.Close()
@@ -47,7 +47,7 @@ func NewUnaryServer(service, daemon string) (grpc.UnaryServerInterceptor, error)
 		return nil, fmt.Errorf("xray: failed to connect to daemon - %s", err)
 	}
 	return grpc.UnaryServerInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp interface{}, err error) {
-		var s *Segment
+		var s *GRPCSegment
 		ctx, s = withSegment(ctx, service, info.FullMethod, connection)
 		if s == nil {
 			return handler(ctx, req)
@@ -68,7 +68,7 @@ func NewStreamServer(service, daemon string) (grpc.StreamServerInterceptor, erro
 	}
 	return grpc.StreamServerInterceptor(func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		ctx := ss.Context()
-		var s *Segment
+		var s *GRPCSegment
 		ctx, s = withSegment(ctx, service, info.FullMethod, connection)
 		wss := grpcm.NewWrappedServerStream(ctx)
 		if s == nil {
@@ -89,8 +89,8 @@ func UnaryClient(host string) grpc.UnaryClientInterceptor {
 		if seg == nil {
 			return invoker(ctx, method, req, reply, cc, opts...)
 		}
-		s := seg.(*Segment)
-		sub := s.NewSubsegment(host)
+		s := seg.(*xray.Segment)
+		sub := GRPCSegment{s.NewSubsegment(host)}
 		defer sub.Close()
 
 		// update the context with the latest segment
@@ -113,8 +113,8 @@ func StreamClient(host string) grpc.StreamClientInterceptor {
 		if seg == nil {
 			return streamer(ctx, desc, cc, method, opts...)
 		}
-		s := seg.(*Segment)
-		sub := s.NewSubsegment(host)
+		s := seg.(*xray.Segment)
+		sub := GRPCSegment{s.NewSubsegment(host)}
 		defer sub.Close()
 
 		// update the context with the latest segment
@@ -132,7 +132,7 @@ func StreamClient(host string) grpc.StreamClientInterceptor {
 
 // withSegment creates a new X-Ray segment and stores it in the context.
 // It also returns the newly created segment.
-func withSegment(ctx context.Context, service, method string, connection func() net.Conn) (context.Context, *Segment) {
+func withSegment(ctx context.Context, service, method string, connection func() net.Conn) (context.Context, *GRPCSegment) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		// incoming metadata does not exist. Probably trace middleware is not
@@ -153,10 +153,10 @@ func withSegment(ctx context.Context, service, method string, connection func() 
 	if traceID == "" || spanID == "" {
 		return ctx, nil
 	}
-	s := NewSegment(service, traceID, spanID, connection())
+	s := &GRPCSegment{xray.NewSegment(service, traceID, spanID, connection())}
 	s.RecordRequest(ctx, method, "")
 	if parentID != "" {
 		s.ParentID = parentID
 	}
-	return context.WithValue(ctx, xray.SegKey, s), s
+	return context.WithValue(ctx, xray.SegKey, s.Segment), s
 }
