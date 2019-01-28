@@ -10,7 +10,6 @@ import (
 	"goa.design/goa/middleware"
 	"goa.design/goa/middleware/xray"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 )
 
 // NewUnaryServer returns a server middleware that sends AWS X-Ray segments
@@ -133,23 +132,11 @@ func StreamClient(host string) grpc.StreamClientInterceptor {
 // withSegment creates a new X-Ray segment and stores it in the context.
 // It also returns the newly created segment.
 func withSegment(ctx context.Context, service, method string, connection func() net.Conn) (context.Context, *GRPCSegment) {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		// incoming metadata does not exist. Probably trace middleware is not
-		// loaded before this one.
-		return ctx, nil
-	}
-
 	var (
-		traceID  string
-		spanID   string
-		parentID string
-	)
-	{
-		spanID = ctx.Value(middleware.TraceSpanIDKey)
-		traceID = ctx.Value(middleware.TraceIDKey)
+		spanID   = ctx.Value(middleware.TraceSpanIDKey)
+		traceID  = ctx.Value(middleware.TraceIDKey)
 		parentID = ctx.Value(middleware.TraceParentSpanIDKey)
-	}
+	)
 	if traceID == nil || spanID == nil {
 		return ctx, nil
 	}
